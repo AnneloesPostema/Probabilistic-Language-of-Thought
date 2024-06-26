@@ -1,0 +1,323 @@
+---
+title: "pLoT model vs. SLM"
+author: "Anneloes de Moel"
+date: "2024-04-17"
+output: html_document
+---
+
+## Loading the necessary packages
+
+```{r}
+library(tidyverse)
+library(dplyr)
+library(readr)
+library(stringr)
+library(lme4)
+library(ggplot2)
+library(flextable)
+library(pROC)
+library(caret)
+```
+
+## Loading the dataframe
+
+```{r}
+setwd("/Users/anneloesdemoel/Documents/UvA/Scriptie")
+
+study1B <- read_delim("Study1B_results.csv", 
+    delim = "\t", escape_double = FALSE, 
+    trim_ws = TRUE)
+
+study1B <- read_table("Study1B_results.csv")
+```
+
+## Re-creating the Streak Length Model
+
+```{r final model}
+
+# Convert 'type' variable to a factor
+study1B$type <- factor(study1B$type)
+
+# Extract the last number in each sequence
+study1B$last_number <- as.numeric(substr(study1B$sequence, nchar(study1B$sequence), nchar(study1B$sequence)))
+
+# Add total count occurrences
+study1B$last_number_count <- str_count(study1B$sequence, substr(study1B$sequence, nchar(study1B$sequence), nchar(study1B$sequence)))
+
+# Recreate the Streak Length Model
+SLM_logit_model <- glmer(prediction_recode ~ terminal_streak_length + last_number_count + generator + (1 | participant_id), data = study1B, family = binomial)
+
+# To determine if the predictors have a significant effect on the dependent variable
+anova(SLM_logit_model) # determines that last_number_count has a higher effect than streak_length and generator has an even lower effect but together a better effect
+
+# Summary of the Streak Length Model
+summary(SLM_logit_model)
+
+# Predict probabilities for each participant
+study1B$predicted_probabilities <- predict(SLM_logit_model, type = "response")
+
+# Changing the prediction probabilities to the probability of printing a '0'
+
+# Function to transform predicted probabilities to probability of predicting '0' as the 9th variable
+transform_prob_to_zero <- function(last_number, predicted_probabilities) {
+  if (last_number == 0) {
+    return(predicted_probabilities)
+  } else {
+    return(1 - predicted_probabilities)
+  }
+}
+
+# Apply the function to each row in the dataset
+study1B$prob_of_zero <- mapply(transform_prob_to_zero, study1B$last_number, study1B$predicted_probabilities)
+
+# View the data with transformed probabilities
+print(study1B)
+
+summary(SLM_logit_model)
+
+```
+
+## Plotting the predicted probabilities from the Streak Length Model
+
+```{r plotting the predicted probabilities}
+
+# Plot the predicted probabilities against last_number_count
+ggplot(study1B, aes(x = last_number_count, y = predicted_probabilities)) +
+  geom_point() +
+  geom_smooth(method = "glm", method.args = list(family = "binomial"), se = FALSE) +
+  labs(x = "Streak", y = "Probability of Repetition") +
+  theme_minimal() +
+   theme(
+    axis.title.x = element_text(size = 17),  
+    axis.title.y = element_text(size = 17),  
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5)  
+  )
+
+# Plot the predicted probabilities against terminal_streak_length
+ggplot(study1B, aes(x = terminal_streak_length, y = predicted_probabilities)) +
+  geom_point() +
+  geom_smooth(method = "glm", method.args = list(family = "binomial"), se = FALSE) +
+  labs(x = "Streak", y = "Probability of Repetition") +
+  theme_minimal() +
+   theme(
+    axis.title.x = element_text(size = 17),  
+    axis.title.y = element_text(size = 17),  
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5)  
+  )
+```
+
+## Making a sample table
+
+```{r making a sample table}
+
+sample <- study1B[sample(nrow(study1B), 10), ] %>%
+  print(width = Inf)
+
+# Select relevant columns
+sample_selected <- sample %>%
+  select(participant_id, generator, sequence, terminal_streak_length, prediction_recode, last_number_count, predicted_probabilities)
+
+# Create the flextable
+flextable_table <- flextable(sample_selected) %>%
+  set_header_labels(
+    participant_id = "Participant ID",
+    generator = "Generator",
+    sequence = "Sequence",
+    terminal_streak_length = "Terminal Streak Length",
+    prediction_recode = "Prediction Recode",
+    last_number_count = "Last Number Count",
+    predicted_probabilities = "Predicted Probabilities"
+  ) %>%
+  bold(part = "header") %>%
+  align(align = "center", part = "all")
+
+# Print the flextable
+flextable_table
+```
+
+## Loading the pLOT model outputs
+
+```{r}
+# Load the dataset containing 'sequences' and 'predicted' (the probabilities)
+better_probs <- read.csv("/Users/anneloesdemoel/Documents/UvA/Scriptie/Python/better_probs.csv")
+
+# Fill the shorter sequences with 0s to get length 8
+better_probs$sequence <- str_pad(better_probs$sequence, width = 8, side = "left", pad = "0")
+
+# Join the datasets by sequence
+comparison <- inner_join(
+  study1B,
+  better_probs,
+  by = "sequence"
+)
+```
+
+## Transforming pLOT predictions into probability of repetition
+
+```{r}
+# transform the pLoT probabilities to probability of repetition
+transform_prob_to_repeat <- function(last_number, prediction) {
+  if (last_number == 0) {
+    return(prediction)
+  } else {
+    return(1 - prediction)
+  }
+}
+
+# Apply transformation to all results
+comparison$pLOT_repeat <- mapply(transform_prob_to_repeat, comparison$last_number, comparison$prediction)
+
+print(comparison)
+
+# Apply pLoT model results to the initial Streak Length Model as predictor variable
+pLOT_logit_model <- glmer(prediction_recode ~ pLOT_repeat + terminal_streak_length + last_number_count + generator + (1 | participant_id), 
+                     data = comparison, 
+                     family = binomial)
+
+comparison$pLOT_prediction <- predict(pLOT_logit_model, type = "response")
+
+summary(pLOT_logit_model) # determine whether the addition of the results create a more significant model for predicting repetition
+```
+
+## Plotting the pLOT recoded
+
+```{r}
+comparison$prediction_recode <- as.factor(comparison$prediction_recode)
+
+ggplot(comparison, aes(x = prediction_recode, y = pLOT_prediction)) +
+  geom_violin(trim = FALSE) +
+  geom_jitter(width = 0.1, size = 1, alpha = 0.1) +
+  geom_smooth(method = "glm", method.args = list(family = "binomial"), se = FALSE) +
+  labs(x = "Recode", y = "Predicted", title = "pLOT repetition") +
+  theme_minimal() +
+   theme(
+    axis.title.x = element_text(size = 14),  
+    axis.title.y = element_text(size = 14),  
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5)  
+  )
+```
+
+## Ploting the predicted probability of repetition against Rao & Hastie recoded probabilities
+
+```{r}
+comparison$prediction_recode <- as.factor(comparison$prediction_recode)
+
+ggplot(comparison, aes(x = prediction_recode, y = predicted_probabilities)) +
+  geom_violin(trim = FALSE) +
+  geom_jitter(width = 0.1, size = 1, alpha = 0.1) +
+  geom_smooth(method = "glm", method.args = list(family = "binomial"), se = FALSE) +
+  labs(x = "Recode", y = "Predicted", title = "SLM repetition") +
+  theme_minimal() +
+   theme(
+    axis.title.x = element_text(size = 14),  
+    axis.title.y = element_text(size = 14),  
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5)  
+  )
+```
+
+```{r}
+library(ggplot2)
+library(dplyr)
+
+# Create a combined data frame of the predicted probabilities
+combined_data <- comparison %>%
+  gather(key = "type", value = "prediction", pLOT_prediction, predicted_probabilities) %>%
+  mutate(type = ifelse(type == "pLOT_prediction", "pLOT repetition", "SLM repetition"))
+
+# Ensure prediction_recode is a factor
+combined_data$prediction_recode <- as.factor(combined_data$prediction_recode)
+
+# Plot the comparison
+ggplot(combined_data, aes(x = prediction_recode, y = prediction, fill = type)) +
+  geom_violin(trim = FALSE, position = position_dodge(width = 0.9)) +
+  geom_jitter(aes(color = type), width = 0.1, size = 1, alpha = 0.05) +
+  geom_smooth(aes(group = type, color = type), method = "glm", method.args = list(family = "binomial"), se = FALSE, position = position_dodge(width = 0.9)) +
+  scale_fill_manual(values = c("pLOT repetition" = "#A9A9A9", "SLM repetition" = "#D3D3D3")) +
+  scale_color_manual(values = c("pLOT repetition" = "#696969", "SLM repetition" = "#B0B0B0")) +
+  labs(x = "Recode", y = "Predicted", title = "Split Violin Plot of pLoT and SLM Repetitions") +
+  theme_minimal() +
+  theme(
+    axis.title.x = element_text(size = 14),  
+    axis.title.y = element_text(size = 14),  
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5)  
+  )
+
+ggplot(combined_data, aes(x = as.factor(prediction_recode), y = prediction, fill = type)) +
+  geom_violin(trim = FALSE, position = position_dodge(width = 0.9)) +
+  geom_jitter(aes(color = type), size = 1, alpha = 0.2, position = position_jitterdodge(jitter.width = 0.2, dodge.width = 0.9)) +
+  geom_smooth(aes(group = type, color = type), method = "glm", method.args = list(family = "binomial"), se = FALSE, position = position_dodge(width = 0.9)) +
+  scale_fill_manual(values = c("pLOT repetition" = "#A9A9A9", "SLM repetition" = "#D3D3D3")) +
+  scale_color_manual(values = c("pLOT repetition" = "royalblue3", "SLM repetition" = "springgreen4")) + 
+  labs(x = "Recode", y = "Predicted", title = "Split Violin Plot of pLoT and SLM Repetitions") +
+  theme_minimal() +
+  theme(
+    axis.title.x = element_text(size = 14),  
+    axis.title.y = element_text(size = 14),  
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5)
+  )
+```
+
+# Comparing the models with a nested model comparison using ANOVA
+
+```{r}
+# First reprint the SLM and pLoT model
+SLM_logit_model <- glmer(prediction_recode ~ terminal_streak_length + last_number_count + generator + (1 | participant_id), data = comparison, family = binomial)
+
+pLOT_logit_model <- glmer(prediction_recode ~ pLOT_repeat + terminal_streak_length + last_number_count + generator + (1 | participant_id), data = comparison, family = binomial)
+
+# Run the anova code to compare the models through Chi squared test
+anova(pLOT_logit_model, SLM_logit_model, test = "Chisq") # including the pLOT results provides a much better fitting model
+```
+
+## Comparing the model outputs for predicting repetition
+
+```{r confusion matrix for probability of repetition}
+
+# Binarize probabilities with a threshold
+threshold <- 0.5 # every value above 0.5 was classified as 'change' and every value below was classified as 'repeat'
+SLM_repeat_prediction <- ifelse(comparison$predicted_probabilities > threshold, 1, 0)
+pLOT_repeat_prediction <- ifelse(comparison$pLOT_prediction > threshold, 1, 0)
+
+# Confusion Matrix for Streak Length Model
+accuracy_SLM <- confusionMatrix(factor(SLM_repeat_prediction), factor(comparison$prediction_recode))
+print(accuracy_SLM)
+
+# Confusion Matric for Probabilistic Language of Thought Model
+accuracy_pLOT <- confusionMatrix(factor(pLOT_repeat_prediction), factor(comparison$prediction_recode))
+print(accuracy_pLOT) 
+```
+
+## Printing confusion matrices
+
+```{r}
+
+# Create a dataframe from the confusion matrix for LOT
+conf_pLOT <- as.data.frame(accuracy_pLOT$table)
+
+# Create a dataframe from the confusion matrix for SLM
+conf_SLM <- as.data.frame(accuracy_SLM$table)
+
+# Combine the confusion matrices into a single dataframe
+conf_combined <- bind_rows(
+  mutate(conf_SLM, Model = "Streak Length Model"),
+  mutate(conf_pLOT, Model = " Probabilistic Language of Thought Model")
+)
+
+# Plot confusion matrices using ggplot and facets
+ggplot(data = conf_combined, aes(x = Reference, y = Prediction)) +
+  geom_tile(aes(fill = Freq), color = "white") +
+  scale_fill_gradient(low = "white", high = "skyblue3") +
+  geom_text(aes(label = Freq), vjust = 1) +
+  labs(title = "Model Accuracy Comparison",
+       x = "Actual",
+       y = "Predicted",
+       fill = "Frequency") +
+  facet_wrap(~Model, ncol = 2) +
+  theme_minimal() +
+  theme(
+    axis.title.x = element_text(size = 17),  
+    axis.title.y = element_text(size = 17),  
+    plot.title = element_text(size = 17, face = "bold", hjust = 0.5)  
+  )
+
+```
